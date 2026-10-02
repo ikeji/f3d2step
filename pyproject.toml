@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "f3d2step"
+version = "0.1.0"
+description = "Convert Autodesk Fusion .f3d files to STEP without Fusion"
+readme = "README.md"
+requires-python = ">=3.8"
+
+[project.optional-dependencies]
+zstd = ["zstandard"]
+
+[project.scripts]
+f3d2step = "f3d2step.__main__:main"
+
+[tool.setuptools]
+packages = ["f3d2step"]
