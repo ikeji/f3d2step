@@ -412,6 +412,21 @@ class Model(object):
     def bodies(self):
         return [r for r in self.top_level() if self.kind(r) == "body"]
 
+    def body_tags(self, body):
+        """Entity tags (as ints) that Fusion attached to a body."""
+        tags = []
+        idx, seen = self.ref(body, 0), set()
+        while idx >= 0 and idx not in seen:
+            seen.add(idx)
+            r = self.rec(idx)
+            if r is None or len(r.tokens) < 5 or r.tokens[2][0] != sab.TAG_REF:
+                break
+            vals = [v for t, v in r.tokens if t in _STR_TAGS]
+            if "generic_tag_attrib_def" in vals:
+                tags.extend(int(v) for v in vals if v.isdigit())
+            idx = self.ref(r, 2)
+        return tags
+
     def body_transform(self, body):
         r = self.rec(self.ref(body, 5))
         if r is None:

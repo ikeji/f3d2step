@@ -6,6 +6,7 @@ import os
 from . import sab
 from .container import F3dFile
 from .model import Model, Unsupported
+from .names import body_names
 from .step import CM_TO_MM, BodyExporter, StepFile
 
 
@@ -35,9 +36,15 @@ class BodyInfo(object):
         self.signature = None
         self.solid = True  # False for surface (sheet) bodies
 
+        self.label = None  # name given in Fusion, when it could be recovered
+
     @property
     def name(self):
         return "Body%d" % self.number
+
+    @property
+    def title(self):
+        return self.label or self.name
 
 
 def _select_blobs(names, all_blobs):
@@ -120,16 +127,46 @@ def scan(path, all_blobs=False, warn=None):
                 if info.duplicate_of == info.number:
                     info.duplicate_of = None
                 bodies.append(info)
+        _assign_names(f3d, bodies)
     finally:
         f3d.close()
     return bodies
+
+
+def _assign_names(f3d, bodies):
+    by_tag, names = {}, []
+    for n in f3d.names():
+        parts = n.split("/")
+        if parts[-1] == "BulkStream.dat" and len(parts) > 1 and "Design" in parts[-2]:
+            try:
+                tagged, found = body_names(f3d.read(n))
+            except Exception:  # names are a nicety; never fail a conversion over them
+                continue
+            by_tag.update(tagged)
+            names.extend(found)
+    for info in bodies:
+        try:
+            tags = info.model.body_tags(info.body)
+        except Unsupported:
+            continue
+        labels = set(by_tag[t] for t in tags if t in by_tag)
+        if len(labels) == 1:
+            info.label = labels.pop()
+    if len(bodies) == 1 and len(names) == 1 and bodies[0].label is None:
+        bodies[0].label = names[0]  # designs without history carry no tags
+
+
+def _filename(text):
+    """Body name made safe for use in a file name."""
+    text = "".join("_" if c in '/\\:*?"<>|' or ord(c) < 32 else c for c in text)
+    return text.strip(" .")
 
 
 def _write(path, name, infos, res):
     step = StepFile(name)
     for info in infos:
         exporter = BodyExporter(step, info.model, res.warnings.append)
-        solids, sheets, faces, skipped = exporter.body(info.body, info.name)
+        solids, sheets, faces, skipped = exporter.body(info.body, info.title)
         res.solids += solids
         res.sheets += sheets
         res.faces += faces
@@ -146,7 +183,7 @@ def convert(src, dst, all_blobs=False, keep_duplicates=False, select=None, split
     """Convert src (.f3d) to dst (.step).
 
     select: optional set of body numbers (as shown by scan) to export.
-    split:  write one file per body, named <dst stem>-BodyN.step.
+    split:  write one file per body, named <dst stem>-<body name>.step.
     solids_only: leave out surface bodies.
     """
     res = Result()
@@ -166,8 +203,14 @@ def convert(src, dst, all_blobs=False, keep_duplicates=False, select=None, split
     name = os.path.splitext(os.path.basename(src))[0]
     if split:
         stem, ext = os.path.splitext(dst)
+        used = set()
         for info in infos:
-            _write("%s-%s%s" % (stem, info.name, ext or ".step"), "%s %s" % (name, info.name), [info], res)
+            # named after the body; the number is added only to tell namesakes apart
+            suffix = _filename(info.title) or info.name
+            if suffix.lower() in used:
+                suffix = "%s-%d" % (suffix, info.number)
+            used.add(suffix.lower())
+            _write("%s-%s%s" % (stem, suffix, ext or ".step"), "%s %s" % (name, info.title), [info], res)
     else:
         _write(dst, name, infos, res)
     if not res.outputs:

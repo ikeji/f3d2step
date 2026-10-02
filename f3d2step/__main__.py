@@ -22,7 +22,8 @@ def _list(path, all_blobs):
             size += " at (%.2f, %.2f, %.2f)" % info.lo
         dup = "  [same as Body%d]" % info.duplicate_of if info.duplicate_of else ""
         kind = "solid  " if info.solid else "surface"
-        print("    %-8s %s %4d faces (%s)%s%s" % (info.name, kind, info.faces, detail, size, dup))
+        label = ' "%s"' % info.label if info.label else ""
+        print("    %-8s %s %4d faces (%s)%s%s%s" % (info.name, kind, info.faces, detail, size, label, dup))
 
 
 def _parse_bodies(text):
@@ -55,7 +56,7 @@ def main(argv=None):
     ap.add_argument(
         "-b", "--bodies", type=_parse_bodies, metavar="LIST", help="export only these bodies, e.g. 1,3-5 (see --list)"
     )
-    ap.add_argument("--split", action="store_true", help="write one STEP file per body (<name>-BodyN.step)")
+    ap.add_argument("--split", action="store_true", help="write one STEP file per body (<name>-<body name>.step)")
     ap.add_argument("--solids-only", action="store_true", help="leave out surface (sheet) bodies")
     ap.add_argument("--all-blobs", action="store_true", help="also read auxiliary .smb blobs (sketch profiles etc.)")
     ap.add_argument("--keep-duplicates", action="store_true", help="do not drop bodies that are stored twice")
