@@ -399,18 +399,56 @@ class BodyExporter(object):
                 continue
             bounds.append(s.add("FACE_BOUND('',#%d,.T.)" % lid))
         sid, flip = self.surface(srec, f)
-        if not bounds:
-            kind, d = m.surface(srec)
-            if kind != "sphere":
-                raise Unsupported("unbounded %s face" % kind)
-            pole, _ = _norm(d["pole"])
-            r = abs(d["radius"])
-            c = d["center"]
-            p = s.point(self.P((c[0] + pole[0] * r, c[1] + pole[1] * r, c[2] + pole[2] * r)))
-            v = s.add("VERTEX_POINT('',#%d)" % p)
-            bounds.append(s.add("FACE_BOUND('',#%d,.T.)" % s.add("VERTEX_LOOP('',#%d)" % v)))
         same = not (m.flag(f, 8) ^ flip)
+        if not bounds:
+            bounds.append(s.add("FACE_BOUND('',#%d,.T.)" % self._seam_loop(srec, same)))
         return s.add("ADVANCED_FACE('',%s,#%d,%s)" % (s.ids(bounds), sid, _b(same)))
+
+    def _seam_loop(self, srec, same):
+        """Boundary for a face covering a whole sphere or torus.  ASM leaves
+        such faces without loops; STEP readers want the seams as edges."""
+        s = self.step
+        kind, d = self.m.surface(srec)
+        c = d["center"]
+
+        def off(*terms):
+            return tuple(c[j] + sum(k * v[j] for k, v in terms) for j in range(3))
+
+        def circle(center, normal, xdir, r):
+            return s.add("CIRCLE('',#%d,%s)" % (s.axis2(self.P(center), self.D(normal), self.D(xdir)), fmt(self.L(r))))
+
+        def vertex(p):
+            return s.add("VERTEX_POINT('',#%d)" % s.point(self.P(p)))
+
+        def oriented(edge, forward):
+            return s.add("ORIENTED_EDGE('',*,*,#%d,%s)" % (edge, _b(forward)))
+
+        if kind == "sphere":
+            z, _ = _norm(d["pole"])
+            k = _dot(d["u"], z)
+            x, _ = _norm(tuple(d["u"][j] - k * z[j] for j in range(3)))
+            r = abs(d["radius"])
+            south, north = vertex(off((-r, z))), vertex(off((r, z)))
+            # meridian from the south pole through x to the north pole
+            mer = circle(c, _cross(x, z), tuple(-v for v in z), r)
+            e = s.add("EDGE_CURVE('',#%d,#%d,#%d,.T.)" % (south, north, mer))
+            edges = [oriented(e, True), oriented(e, False)]
+        elif kind == "torus" and d["major"] > abs(d["minor"]):
+            z, _ = _norm(d["axis"])
+            k = _dot(d["u"], z)
+            x, _ = _norm(tuple(d["u"][j] - k * z[j] for j in range(3)))
+            R, r = d["major"], abs(d["minor"])
+            v = vertex(off((R + r, x)))
+            big = circle(c, z, x, R + r)
+            tube = circle(off((R, x)), _cross(x, z), x, r)
+            ea = s.add("EDGE_CURVE('',#%d,#%d,#%d,.T.)" % (v, v, big))
+            eb = s.add("EDGE_CURVE('',#%d,#%d,#%d,.T.)" % (v, v, tube))
+            edges = [oriented(ea, True), oriented(eb, True), oriented(ea, False), oriented(eb, False)]
+        else:
+            raise Unsupported("unbounded %s face" % kind)
+        if not same:
+            edges.reverse()
+        return s.add("EDGE_LOOP('',%s)" % s.ids(edges))
 
     def _is_free(self, coedge):
         """True for a coedge on an open boundary (degenerate edges do not count)."""

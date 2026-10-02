@@ -288,6 +288,57 @@ class Transform(object):
         return tuple(d[0] * r[0][j] + d[1] * r[1][j] + d[2] * r[2][j] for j in range(3))
 
 
+def helix_circ_surface(tokens, start, end, vrange):
+    """B-spline for 'helix_spl_circ' (coil): a circle lying in the plane
+    through the helix axis, swept along the helix.  u is the angle on the
+    circle (exact, rational quadratic), v the helix angle."""
+    c = Cursor(tokens, start, end)
+    _skip_version(c)
+    c.limit(), c.limit()
+    v0, v1 = c.limit(), c.limit()
+    c.f()
+    hx = Helix(c)
+    for _ in range(4):  # two null surfaces, two null pcurves
+        tag, val = c.next()
+        if tag not in _STR_TAGS or not val.startswith("null"):
+            raise Unsupported("helix surface with support data")
+    radius = c.f()
+    if vrange[0] is not None and vrange[1] is not None:
+        v0, v1 = vrange
+    if v0 is None or v1 is None or not v1 > v0:
+        raise Unsupported("unbounded helix surface")
+    rmaj = math.sqrt(sum(x * x for x in hx.major))
+    if rmaj < 1e-300:
+        raise Unsupported("degenerate helix")
+    nodes = _helix_nodes(v0, v1)
+    s = BSpline()
+    s.rational = True
+    s.udeg, s.vdeg = 2, 3
+    hp = math.pi / 2.0
+    s.uknots, s.umults = [-2 * hp, -hp, 0.0, hp, 2 * hp], [3, 2, 2, 2, 3]
+    s.vknots = nodes
+    s.vmults = [4] + [3] * (len(nodes) - 2) + [4]
+    w = math.sqrt(0.5)
+    # control polygon of the circle (-cos u, sin u), u = -pi .. pi
+    square = [(1, 0), (1, -1), (0, -1), (-1, -1), (-1, 0), (-1, 1), (0, 1), (1, 1), (1, 0)]
+    s.weights = []
+    for k, (a, b) in enumerate(square):
+        a, b = a * radius / rmaj, b * radius
+
+        def pos(v, a=a, b=b):
+            p, r = hx.pos(v), hx.frame(v, a, 0.0, b)
+            return tuple(p[j] + r[j] for j in range(3))
+
+        def tan(v, a=a):
+            t, r = hx.tan(v), hx.frame(v, 0.0, a, 0.0)
+            return tuple(t[j] + r[j] for j in range(3))
+
+        row = _hermite(nodes, pos, tan)
+        s.poles.append(row)
+        s.weights.append([w if k % 2 else 1.0] * len(row))
+    return s
+
+
 class _Tokens(object):
     """Minimal record stand-in for resolving a nested subtype block."""
 
@@ -563,6 +614,8 @@ class Model(object):
                 nurbs.reseam_surface(bs, urange, vrange)
             elif name == "helix_spl_line":
                 bs = helix_line_surface(toks, start, end, urange, vrange)
+            elif name == "helix_spl_circ":
+                bs = helix_circ_surface(toks, start, end, vrange)
             elif name == "cyl_spl_sur":
                 return "extrusion", self._extrusion(toks, start, end, reverse)
             else:
