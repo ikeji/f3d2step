@@ -8,9 +8,9 @@ from .convert import convert, scan
 from .model import Unsupported
 
 
-def _list(path, all_blobs):
+def _list(path, all_blobs, default_name):
     blob = None
-    for info in scan(path, all_blobs, lambda w: print("warning: %s" % w, file=sys.stderr)):
+    for info in scan(path, all_blobs, lambda w: print("warning: %s" % w, file=sys.stderr), default_name):
         if info.blob != blob:
             blob = info.blob
             h = info.model.header
@@ -23,7 +23,8 @@ def _list(path, all_blobs):
         dup = "  [same as Body%d]" % info.duplicate_of if info.duplicate_of else ""
         kind = "solid  " if info.solid else "surface"
         label = ' "%s"' % info.label if info.label else ""
-        print("    %-8s %s %4d faces (%s)%s%s%s" % (info.name, kind, info.faces, detail, size, label, dup))
+        state = {True: "visible", False: "hidden ", None: "?      "}[info.visible]
+        print("    %-8s %s %s %4d faces (%s)%s%s%s" % (info.name, kind, state, info.faces, detail, size, label, dup))
 
 
 def _parse_bodies(text):
@@ -57,6 +58,13 @@ def main(argv=None):
         "-b", "--bodies", type=_parse_bodies, metavar="LIST", help="export only these bodies, e.g. 1,3-5 (see --list)"
     )
     ap.add_argument("--split", action="store_true", help="write one STEP file per body (<name>-<body name>.step)")
+    ap.add_argument(
+        "--default-name",
+        default="Body%d",
+        metavar="PATTERN",
+        help='name for bodies left with Fusion\'s default name, e.g. "ボディ%%d" for a Japanese UI (default: Body%%d)',
+    )
+    ap.add_argument("--include-hidden", action="store_true", help="also export bodies that are hidden in Fusion")
     ap.add_argument("--solids-only", action="store_true", help="leave out surface (sheet) bodies")
     ap.add_argument("--all-blobs", action="store_true", help="also read auxiliary .smb blobs (sketch profiles etc.)")
     ap.add_argument("--keep-duplicates", action="store_true", help="do not drop bodies that are stored twice")
@@ -69,7 +77,7 @@ def main(argv=None):
         try:
             if args.list:
                 print("%s:" % src)
-                _list(src, args.all_blobs)
+                _list(src, args.all_blobs, args.default_name)
                 continue
             base = os.path.splitext(os.path.basename(src))[0] + ".step"
             if args.output is None:
@@ -87,6 +95,8 @@ def main(argv=None):
                 select=args.bodies,
                 split=args.split,
                 solids_only=args.solids_only,
+                include_hidden=args.include_hidden,
+                default_name=args.default_name,
             )
             if not args.quiet:
                 for w in res.warnings:
@@ -98,6 +108,8 @@ def main(argv=None):
                 status = 2
             if res.duplicates:
                 msg += ", %d duplicate body(ies) dropped" % res.duplicates
+            if res.hidden:
+                msg += ", %d hidden body(ies) skipped" % res.hidden
             print(msg)
         except (OSError, ContainerError, Unsupported, sab.SabError) as ex:
             print("error: %s: %s" % (src, ex), file=sys.stderr)

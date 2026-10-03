@@ -12,8 +12,8 @@ import struct
 
 # entity tag followed by an ASCII object key
 _HEAD = re.compile(rb"(?s)(.{4})\x00{5}\x01\x00{5}[\x01-\x09]\x00\x00\x00\d")
-# GUID string, two doubles, default-name number, colour, flags
-_ANCHOR = re.compile(rb"(?s)\x24\x00\x00\x00(?:[0-9a-fA-F-]\x00){36}.{16}(.{4})\x01\x00{4}.{4}\x01\x01")
+# GUID string, two doubles, default-name number, colour, visibility flag
+_ANCHOR = re.compile(rb"(?s)\x24\x00\x00\x00(?:[0-9a-fA-F-]\x00){36}.{16}(.{4})\x01\x00{4}.{4}\x01([\x00\x01])")
 _REF7 = re.compile(rb"(?s)\x01.{4}\x00{7}")
 _REF6 = re.compile(rb"(?s)\x01.{4}\x00{6}")
 _FLAGS = re.compile(rb"\x01\x01\x00{9}")
@@ -61,33 +61,47 @@ def _name_after(data, pos):
     return name
 
 
+_BLOB = re.compile(rb"B\x00R\x00E\x00P\x00\.\x00((?:[0-9a-f-]\x00){36})\.\x00s\x00m\x00b\x00")
+
+
+class BodyRecord(object):
+    __slots__ = ("tag", "name", "index", "visible", "pos")
+
+    def __init__(self, tag, name, index, visible, pos):
+        self.tag = tag  # entity tag shared with the B-rep body, or None
+        self.name = name  # '' when the body keeps its default name
+        self.index = index  # number in the default name (localized "Body<n>")
+        self.visible = visible
+        self.pos = pos  # offset in the stream
+
+    def title(self, default="Body%d"):
+        return self.name or default % self.index
+
+
 def body_records(data):
-    """Returns [(entity tag or None, name)] for the body records found."""
+    """Returns the BodyRecords found in a design stream, in file order."""
     out = []
     last = 0
     for m in _ANCHOR.finditer(data):
         name = _name_after(data, m.end())
         if name is None:
             continue
-        if not name:
-            (index,) = struct.unpack("<I", m.group(1))
-            if not 0 < index < 100000:
-                continue
-            name = "Body%d" % index
+        (index,) = struct.unpack("<I", m.group(1))
+        if not name and not 0 < index < 100000:
+            continue
         tag = None
         for h in _HEAD.finditer(data, last, m.start()):
             (tag,) = struct.unpack("<I", h.group(1))
-        out.append((tag, name))
+        out.append(BodyRecord(tag, name, index, m.group(2) == b"\x01", m.start()))
         last = m.end()
     return out
 
 
-def body_names(data):
-    """Returns ({entity tag: name}, [all names]).  Tags that occur with
-    different names are left out of the mapping."""
-    records = body_records(data)
-    found = {}
-    for tag, name in records:
-        if tag is not None:
-            found.setdefault(tag, set()).add(name)
-    return {t: n.pop() for t, n in found.items() if len(n) == 1}, [n for _, n in records]
+def blob_markers(data):
+    """Returns {blob GUID: offset} for the B-rep blob names mentioned in a
+    design stream.  The bodies of an inserted component are described by
+    tagless records near the mention of that component's blob."""
+    out = {}
+    for m in _BLOB.finditer(data):
+        out.setdefault(m.group(1).decode("utf-16-le"), m.start())
+    return out

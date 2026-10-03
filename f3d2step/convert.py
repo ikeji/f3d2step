@@ -6,7 +6,7 @@ import os
 from . import sab
 from .container import F3dFile
 from .model import Model, Unsupported
-from .names import body_names
+from .names import blob_markers, body_records
 from .step import CM_TO_MM, BodyExporter, StepFile
 
 
@@ -18,6 +18,7 @@ class Result(object):
         self.faces = 0
         self.skipped_faces = 0
         self.duplicates = 0
+        self.hidden = 0
         self.warnings = []
 
 
@@ -37,6 +38,7 @@ class BodyInfo(object):
         self.solid = True  # False for surface (sheet) bodies
 
         self.label = None  # name given in Fusion, when it could be recovered
+        self.visible = None  # True/False from the design stream, None if unknown
 
     @property
     def name(self):
@@ -69,6 +71,13 @@ def _inspect(info):
                 kind = srec.name.split("-")[0] if srec else "none"
                 info.kinds[kind] += 1
                 pts.add((kind, model.flag(f, 8)))
+                if srec is not None and kind in ("sphere", "torus", "cone", "plane"):
+                    try:  # faces without vertices (full spheres) still need a position
+                        _, d = model.surface(srec)
+                        c = d.get("center") or d.get("root")
+                        pts.add((kind,) + tuple(round(x, 7) for x in xf.point(c)))
+                    except Unsupported:
+                        pass
                 if model.flag(f, 9):  # double-sided face
                     info.solid = False
                 for loop in model.loops(f):
@@ -102,8 +111,11 @@ def _inspect(info):
     info.signature = (info.faces, frozenset(pts))
 
 
-def scan(path, all_blobs=False, warn=None):
-    """Returns the BodyInfo list of all non-empty bodies in the file."""
+def scan(path, all_blobs=False, warn=None, default_name="Body%d"):
+    """Returns the BodyInfo list of all non-empty bodies in the file.
+
+    default_name: pattern for bodies Fusion shows with a default name; the
+    stored design does not say which language the UI used."""
     f3d = F3dFile(path)
     bodies = []
     try:
@@ -127,33 +139,116 @@ def scan(path, all_blobs=False, warn=None):
                 if info.duplicate_of == info.number:
                     info.duplicate_of = None
                 bodies.append(info)
-        _assign_names(f3d, bodies)
+        _assign_names(f3d, bodies, default_name)
     finally:
         f3d.close()
     return bodies
 
 
-def _assign_names(f3d, bodies):
-    by_tag, names = {}, []
+def _assign_names(f3d, bodies, default_name):
+    """Match design-stream body records to B-rep bodies through their tags."""
+    records, markers = [], {}
     for n in f3d.names():
         parts = n.split("/")
         if parts[-1] == "BulkStream.dat" and len(parts) > 1 and "Design" in parts[-2]:
             try:
-                tagged, found = body_names(f3d.read(n))
+                data = f3d.read(n)
+                records.extend(body_records(data))
+                markers.update(blob_markers(data))
             except Exception:  # names are a nicety; never fail a conversion over them
                 continue
-            by_tag.update(tagged)
-            names.extend(found)
+    by_tag = {}
+    for r in records:
+        if r.tag is not None:
+            by_tag.setdefault(r.tag, []).append(r)
+    hits_of = {}
     for info in bodies:
         try:
             tags = info.model.body_tags(info.body)
         except Unsupported:
             continue
-        labels = set(by_tag[t] for t in tags if t in by_tag)
-        if len(labels) == 1:
-            info.label = labels.pop()
-    if len(bodies) == 1 and len(names) == 1 and bodies[0].label is None:
-        bodies[0].label = names[0]  # designs without history carry no tags
+        hits = [r for t in tags for r in by_tag.get(t, [])]
+        hits_of[info.number] = hits
+        if not hits:
+            # copied/mirrored bodies: the record carries the next tag number
+            hits = [r for t in tags for r in by_tag.get(t + 1, [])]
+        if hits:
+            titles = set(r.title(default_name) for r in hits)
+            info.label = titles.pop() if len(titles) == 1 else None
+            info.visible = any(r.visible for r in hits)
+    if len(bodies) == 1 and len(records) == 1 and bodies[0].label is None:
+        bodies[0].label = records[0].title(default_name)  # designs without history carry no tags
+        bodies[0].visible = records[0].visible
+    used = set()
+    for info in bodies:
+        if info.label is not None:
+            used.update(id(r) for r in hits_of.get(info.number, []))
+    _assign_inserted(bodies, records, markers, default_name, used)
+    _assign_by_order(bodies, records, default_name, used)
+
+
+def _assign_by_order(bodies, records, default_name, used):
+    """Tagless records in a component with tagged ones: records are stored
+    in creation order, so a tagless record between records with tags a and
+    b describes a body whose tag lies between a and b."""
+    anchors = []  # (pos, tag) with tags increasing along the stream
+    for r in records:
+        if r.tag is not None and (not anchors or r.tag > anchors[-1][1]):
+            anchors.append((r.pos, r.tag))
+    groups = {}
+    for r in records:
+        if r.tag is not None or id(r) in used:
+            continue
+        lo = max([t for p, t in anchors if p < r.pos] or [0])
+        hi = min([t for p, t in anchors if p > r.pos] or [1 << 31])
+        groups.setdefault((lo, hi), []).append(r)
+    pending = {}
+    for info in bodies:
+        if info.label is not None or info.visible is not None:
+            continue
+        try:
+            tags = info.model.body_tags(info.body)
+        except Unsupported:
+            continue
+        tag = min(tags)  # the body's own tag; later ones come from features
+        for (lo, hi), recs in groups.items():
+            if lo < tag < hi:
+                pending.setdefault((lo, hi), []).append((tag, info))
+    for key, cands in pending.items():
+        recs = sorted(groups[key], key=lambda r: r.pos)
+        if len(recs) != len(cands):
+            recs = [r for r in recs if r.visible]
+            if len(recs) != len(cands):
+                continue
+        for (_, info), r in zip(sorted(cands, key=lambda c: c[0]), recs):
+            info.label = r.title(default_name)
+            info.visible = r.visible
+            used.add(id(r))
+
+
+def _assign_inserted(bodies, records, markers, default_name, used):
+    """Bodies of inserted components carry no usable tags; their records
+    (tagless, visible) sit next to the mention of the component's blob."""
+    by_blob = {}
+    for info in bodies:
+        by_blob.setdefault(info.blob, []).append(info)
+    free = [r for r in records if r.tag is None and r.visible and id(r) not in used]
+    for blob, infos in sorted(by_blob.items(), key=lambda kv: kv[1][0].number):
+        if any(i.label is not None or i.visible is not None for i in infos):
+            continue
+        guid = blob[5:-5] if blob.endswith(".smbh") else blob[5:-4]
+        if guid not in markers:
+            continue
+        at = markers[guid]
+        near = sorted(free, key=lambda r: abs(r.pos - at))[: len(infos)]
+        if len(near) < len(infos) or any(abs(r.pos - at) > 200000 for r in near):
+            continue
+        near.sort(key=lambda r: r.pos)
+        for info, r in zip(infos, near):
+            info.label = r.title(default_name)
+            info.visible = True
+            free.remove(r)
+            used.add(id(r))
 
 
 def _filename(text):
@@ -179,23 +274,39 @@ def _write(path, name, infos, res):
     res.outputs.append(path)
 
 
-def convert(src, dst, all_blobs=False, keep_duplicates=False, select=None, split=False, solids_only=False):
+def convert(
+    src,
+    dst,
+    all_blobs=False,
+    keep_duplicates=False,
+    select=None,
+    split=False,
+    solids_only=False,
+    include_hidden=False,
+    default_name="Body%d",
+):
     """Convert src (.f3d) to dst (.step).
 
     select: optional set of body numbers (as shown by scan) to export.
     split:  write one file per body, named <dst stem>-<body name>.step.
     solids_only: leave out surface bodies.
+    include_hidden: also export bodies Fusion shows as hidden.
+    default_name: pattern for bodies that keep Fusion's default name.
     """
     res = Result()
-    infos = scan(src, all_blobs, res.warnings.append)
+    infos = scan(src, all_blobs, res.warnings.append, default_name)
     if select is not None:
         missing = sorted(set(select) - set(i.number for i in infos))
         if missing:
             raise Unsupported("no such body: %s" % ", ".join(str(n) for n in missing))
         infos = [i for i in infos if i.number in select]
-    elif not keep_duplicates:
-        res.duplicates = sum(1 for i in infos if i.duplicate_of is not None)
-        infos = [i for i in infos if i.duplicate_of is None]
+    else:
+        if not keep_duplicates:
+            res.duplicates = sum(1 for i in infos if i.duplicate_of is not None)
+            infos = [i for i in infos if i.duplicate_of is None]
+        if not include_hidden:
+            res.hidden = sum(1 for i in infos if i.visible is False)
+            infos = [i for i in infos if i.visible is not False]
     if solids_only:
         infos = [i for i in infos if i.solid]
     if not infos:
