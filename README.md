@@ -1,100 +1,105 @@
 # f3d2step
 
-Autodesk Fusion (Fusion 360) の `.f3d` ファイルを、Fusion 本体なしで STEP (AP214) に変換するコマンドラインツールです。
-Python 標準ライブラリだけで動きます (Python 3.8 以降)。
+English | [日本語](README.ja.md)
 
-`.f3d` は zip アーカイブで、中に形状データが Autodesk ShapeManager (ASM、ACIS 系) のバイナリ B-rep として入っています。
-このツールはそれを直接読み、面・エッジ・頂点のトポロジと曲面/曲線の定義を STEP の B-rep に書き換えます。
-メッシュ化はしないので、平面・円筒・円錐・球・トーラスはそのまま解析曲面として、自由曲面は NURBS として出力されます。
+A command-line tool that converts Autodesk Fusion (Fusion 360) `.f3d` files to STEP (AP214) without Fusion.
+It needs nothing but the Python standard library (Python 3.8 or later).
 
-## 使い方
+A `.f3d` file is a zip archive whose geometry is stored as binary B-rep data of Autodesk ShapeManager
+(ASM, an ACIS derivative). This tool reads that data directly and rewrites the topology (faces, edges,
+vertices) and the surface/curve definitions as a STEP B-rep. Nothing is tessellated: planes, cylinders,
+cones, spheres and tori stay analytic surfaces, and free-form surfaces come out as NURBS.
+
+## Usage
 
 ```sh
-python3 -m f3d2step part.f3d                 # part.step を同じ場所に作る
-python3 -m f3d2step part.f3d -o out.step     # 出力先を指定
-python3 -m f3d2step *.f3d -o outdir/         # まとめて変換
+python3 -m f3d2step part.f3d                 # writes part.step next to the input
+python3 -m f3d2step part.f3d -o out.step     # choose the output file
+python3 -m f3d2step *.f3d -o outdir/         # convert many files
 
-python3 -m f3d2step -l part.f3d              # 入っているボディを一覧
-python3 -m f3d2step part.f3d -b 2,5-7        # 一覧の番号でボディを選んで出力
-python3 -m f3d2step part.f3d --split         # ボディごとに part-<ボディ名>.step を作る
+python3 -m f3d2step -l part.f3d              # list the bodies in the file
+python3 -m f3d2step part.f3d -b 2,5-7        # export only the listed body numbers
+python3 -m f3d2step part.f3d --split         # one file per body: part-<body name>.step
 ```
 
-`pip install .` すると `f3d2step` コマンドとしても使えます。
+After `pip install .` the tool is also available as the `f3d2step` command.
 
-| オプション | 意味 |
+| Option | Meaning |
 | --- | --- |
-| `-o, --output` | 出力ファイル (入力が 1 つのとき) またはディレクトリ |
-| `-l, --list` | 変換せず、ボディの一覧 (面数・大きさ・位置) を表示 |
-| `-b, --bodies LIST` | 出力するボディ番号。例: `1,3-5` |
-| `--split` | ボディごとに別ファイルへ出力。ファイル名は `<名前>-<ボディ名>.step` (同名があれば番号を付加) |
-| `--include-hidden` | Fusion で非表示になっているボディも出力する |
-| `--default-name PATTERN` | 既定名のままのボディに付ける名前。日本語 UI で保存した設計なら `"ボディ%d"` (既定: `Body%d`) |
-| `--solids-only` | サーフェスボディ (厚みのない面だけのボディ) を出力しない |
-| `--keep-duplicates` | 同一形状・同一位置で重複して保存されているボディも出力 |
-| `--all-blobs` | 補助データ (`.smb`: スケッチプロファイル等) も読む |
-| `-q, --quiet` | 警告を表示しない |
+| `-o, --output` | Output file (single input) or directory |
+| `-l, --list` | List the bodies (face count, size, position) instead of converting |
+| `-b, --bodies LIST` | Body numbers to export, e.g. `1,3-5` |
+| `--split` | One file per body, named `<name>-<body name>.step` (a number is added to tell namesakes apart) |
+| `--include-hidden` | Also export bodies that are hidden in Fusion |
+| `--default-name PATTERN` | Name for bodies that keep Fusion's default name; use `"ボディ%d"` for designs saved from a Japanese UI (default: `Body%d`) |
+| `--solids-only` | Leave out surface bodies (sheets without thickness) |
+| `--keep-duplicates` | Also export bodies stored twice with identical shape and position |
+| `--all-blobs` | Also read the auxiliary data (`.smb`: sketch profiles and the like) |
+| `-q, --quiet` | Suppress warnings |
 
-終了コード: 0 = 成功、1 = 変換できなかったファイルがある、2 = 変換できない面があり一部を飛ばした。
+Exit status: 0 = success, 1 = some file could not be converted, 2 = some faces could not be converted and were skipped.
 
-新しい Fusion が書き出す `.f3d` は Zstandard 圧縮です。Python 3.14 以降ならそのまま読めます。
-それより古い Python では `zstd` コマンドか `zstandard` パッケージ (`pip install zstandard`) のどちらかが必要です。
+Files written by recent versions of Fusion are Zstandard-compressed. Python 3.14 and later read them as is;
+older Pythons need either the `zstd` command or the `zstandard` package (`pip install zstandard`).
 
-## 制限
+## Limitations
 
-**どのボディが「最終形状」かの判定は部分的です。**
+**Deciding which bodies are the "final shape" works only partially.**
 
-`.f3d` の形状データには、タイムライン上で消費・除去されたボディや非表示のボディも残っています。
-設計ストリーム (`BulkStream.dat`) のボディ記録から表示/非表示を読み、形状データ側のボディと突き合わせていますが、
-全体を解読しているわけではないので結び付けられないボディが残ります。`-l` の一覧には状態が出ます:
+The geometry data in a `.f3d` also keeps bodies that were consumed or removed along the timeline, and hidden bodies.
+The tool reads the visibility of body records in the design stream (`BulkStream.dat`) and matches them to the
+bodies in the geometry data, but it does not decode the stream as a whole, so some bodies cannot be matched.
+The `-l` listing shows the state of each body:
 
-| 状態 | 意味 | 既定の扱い |
+| State | Meaning | Default |
 | --- | --- | --- |
-| `visible` | 記録と結び付き、Fusion で表示されている | 出力する |
-| `hidden` | 記録と結び付き、非表示 | 出力しない (`--include-hidden` で出力) |
-| `?` | 記録と結び付けられなかった (挿入したコンポーネントのボディなど) | 出力する |
+| `visible` | Matched to a record and shown in Fusion | exported |
+| `hidden` | Matched to a record and hidden | not exported (`--include-hidden` exports it) |
+| `?` | No record could be matched (e.g. bodies of inserted components) | exported |
 
-- ボディが 1 つだけの部品は、Fusion 自身の STEP 出力と面数・体積が一致します。
-- `?` のボディには Fusion の画面には無いものが混ざることがあります。`-l` で一覧を見て `-b` で選んでください。
-- コンポーネントの配置 (オカレンスの移動・回転) とインスタンスの複製は反映されません。
-  各ボディはコンポーネントのローカル座標のまま出力されるので、移動やジョイントで組んだアセンブリは位置がずれ、
-  同じコンポーネントを複数配置していても 1 個しか出ません。配置ごとの表示/非表示も見ていません。
+- For single-body parts, face counts and volumes match Fusion's own STEP export.
+- `?` bodies may include bodies that are not visible in Fusion. Check the `-l` listing and pick bodies with `-b`.
+- Component placement (occurrence transforms) and instancing are not applied. Every body is written in its
+  component's local coordinates, so assemblies put together by moving or jointing components come out displaced,
+  and a component placed several times appears only once. Per-occurrence visibility is not read either.
 
-そのほか:
+Also:
 
-- ボディ名は設計ストリームから拾えたものだけ反映します (`-l` の一覧では `"名前"` として表示)。
-  名前を変えていないボディは Fusion の UI 言語で既定名が付くので、`--default-name` で合わせてください。
-  拾えなかったボディは `Body1`, `Body2`, ... (一覧の番号) になります。色・材質は出力しません。
-- スケッチ、作業平面、メッシュボディ、T スプラインの編集情報は対象外です。
-- 自由曲面は ASM が保存している NURBS 近似を使います。近似が保存されていない種類の曲面は、
-  ヘリカル面 (ねじ山・コイル) と押し出し面だけ解析的に組み立てています。それ以外に出会うと、その面を飛ばして警告を出します
-  (そのボディはソリッドではなくサーフェスとして出力されます)。
-- テーパ付きヘリカル (円錐コイル) と楕円錐は未対応です。
-- 単位は mm 固定です。
+- Body names are used only when they can be recovered from the design stream (shown as `"name"` in the `-l` listing).
+  Bodies that were never renamed get a default name in the language of the Fusion UI, so set `--default-name` to match.
+  Bodies without a recovered name are called `Body1`, `Body2`, ... (the listing numbers). Colours and materials are not exported.
+- Sketches, construction planes, mesh bodies and T-spline editing data are out of scope.
+- Free-form surfaces use the NURBS approximations ASM stores. Of the surface kinds without a stored approximation,
+  only helical surfaces (threads, coils) and extrusions are rebuilt analytically. Any other kind makes the tool
+  skip that face with a warning (the body is then written as a surface model instead of a solid).
+- Tapered helices (conical coils) and elliptical cones are not supported.
+- Output units are always millimetres.
 
-## 検証状況
+## Validation
 
-GitHub で公開されている `.f3d` 約 90 個 (2021〜2026 年の Fusion で保存されたもの、最大で 1 万面超) を変換し、
-出力を OpenCascade で読み込んで形状の妥当性チェック (BRepCheck) をかけています。
-Fusion 自身が出力した STEP が一緒に公開されている部品では、面数・体積・表面積・バウンディングボックスを比較しています。
+About 90 publicly available `.f3d` files from GitHub (saved by Fusion versions from 2021 to 2026, up to more than
+10,000 faces) were converted and the output was loaded into OpenCascade for a shape validity check (BRepCheck).
+For parts published together with Fusion's own STEP export, face count, volume, surface area and bounding box were compared.
 
-## 仕組み
+## How it works
 
-| ファイル | 役割 |
+| File | Role |
 | --- | --- |
-| `f3d2step/container.py` | zip (deflate / zstd) から B-rep ブロブを取り出す |
-| `f3d2step/sab.py` | ASM バイナリ (SAB) のトークナイザ |
-| `f3d2step/model.py` | レコードをトポロジと幾何として解釈する。NURBS 近似の取り出し、ヘリカル形状の生成 |
-| `f3d2step/nurbs.py` | 周期スプラインのシーム位置の付け替え |
-| `f3d2step/step.py` | STEP の書き出し |
-| `f3d2step/names.py` | 設計ストリームからボディ名を拾う |
-| `f3d2step/convert.py` | ボディの列挙・選択と変換の入口 |
+| `f3d2step/container.py` | Extracts the B-rep blobs from the zip (deflate / zstd) |
+| `f3d2step/sab.py` | Tokenizer for the ASM binary format (SAB) |
+| `f3d2step/model.py` | Interprets the records as topology and geometry; extracts NURBS approximations, builds helical shapes |
+| `f3d2step/nurbs.py` | Moves the seams of periodic splines |
+| `f3d2step/step.py` | STEP writer |
+| `f3d2step/names.py` | Recovers body names from the design stream |
+| `f3d2step/convert.py` | Body enumeration, selection and the conversion entry point |
 
-履歴つきの設計では `Breps.BlobParts/*.smbh` にコンポーネントごとのボディが入っています (`.smb` はスケッチプロファイル等)。
-履歴なし、または新しい形式では `.smb` にボディが入っています。長さの単位は cm なので、出力時に mm に直しています。
+In designs with a history, the bodies of each component live in `Breps.BlobParts/*.smbh` (`.smb` holds sketch profiles
+and the like). Designs without a history, and files in the newer format, keep the bodies in `.smb`. Lengths are stored
+in centimetres and converted to millimetres on output.
 
-テスト: `python3 -m unittest discover -s tests -t .`
+Tests: `python3 -m unittest discover -s tests -t .`
 
-## 参考
+## Acknowledgements
 
-SAB のレコード構造を調べるにあたり、[InventorLoader](https://github.com/jmplonka/InventorLoader) (FreeCAD 用の Inventor/Fusion インポータ)
-の解析結果を参考にしました。コードは流用していません。
+The analysis of the SAB record structure in [InventorLoader](https://github.com/jmplonka/InventorLoader) (an Inventor/Fusion
+importer for FreeCAD) was used as a reference while working out the format. No code was taken from it.
